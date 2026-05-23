@@ -35,7 +35,8 @@ const (
 	DefaultListenClientURLs = "http://localhost:2379"
 
 	// DefaultMaxSnapshots is the default maximum number of snapshots to retain.
-	DefaultMaxSnapshots = 5
+	// Increased from 5 to 10 to keep more snapshot history for easier recovery.
+	DefaultMaxSnapshots = 10
 
 	// DefaultMaxWALs is the default maximum number of WAL files to retain.
 	DefaultMaxWALs = 5
@@ -83,62 +84,4 @@ type ServerConfig struct {
 	MaxWALs uint `json:"max-wals"`
 
 	// TickMs is the interval in milliseconds for the Raft heartbeat tick.
-	TickMs uint `json:"heartbeat-interval"`
-
-	// ElectionMs is the timeout in milliseconds for the Raft election.
-	ElectionMs uint `json:"election-timeout"`
-
-	// EnableV2 enables the deprecated V2 API.
-	EnableV2 bool `json:"enable-v2"`
-
-	// Debug enables debug-level logging.
-	Debug bool `json:"debug"`
-}
-
-// NewServerConfig returns a ServerConfig populated with default values.
-func NewServerConfig() *ServerConfig {
-	return &ServerConfig{
-		Name:         DefaultName,
-		DataDir:      DefaultDataDir,
-		MaxSnapshots: DefaultMaxSnapshots,
-		MaxWALs:      DefaultMaxWALs,
-		TickMs:       DefaultTickMs,
-		ElectionMs:   DefaultElectionMs,
-	}
-}
-
-// Validate checks the ServerConfig for required fields and logical consistency.
-func (c *ServerConfig) Validate() error {
-	if c.Name == "" {
-		return fmt.Errorf("member name cannot be empty")
-	}
-	if c.DataDir == "" {
-		return fmt.Errorf("data directory cannot be empty")
-	}
-	if c.TickMs == 0 {
-		return fmt.Errorf("heartbeat interval must be greater than 0")
-	}
-	if c.ElectionMs == 0 {
-		return fmt.Errorf("election timeout must be greater than 0")
-	}
-	if c.ElectionMs < c.TickMs {
-		return fmt.Errorf("election timeout (%dms) must be >= heartbeat interval (%dms)", c.ElectionMs, c.TickMs)
-	}
-	if len(c.ListenPeerURLs) == 0 {
-		return fmt.Errorf("at least one listen peer URL must be specified")
-	}
-	if len(c.ListenClientURLs) == 0 {
-		return fmt.Errorf("at least one listen client URL must be specified")
-	}
-	return nil
-}
-
-// HeartbeatInterval returns the heartbeat interval as a time.Duration.
-func (c *ServerConfig) HeartbeatInterval() time.Duration {
-	return time.Duration(c.TickMs) * time.Millisecond
-}
-
-// ElectionTimeout returns the election timeout as a time.Duration.
-func (c *ServerConfig) ElectionTimeout() time.Duration {
-	return time.Duration(c.ElectionMs) * time.Millisecond
-}
+	TickMs uint `json:"heartbe
