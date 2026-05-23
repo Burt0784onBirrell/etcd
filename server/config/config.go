@@ -1,4 +1,4 @@
-// Copyright 2015 The etcd Authors
+// Copyright 2024 The etcd Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,349 +12,133 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package config provides configuration structures and validation for the etcd server.
 package config
 
 import (
-	"context"
 	"fmt"
-	"path/filepath"
-	"sort"
-	"strings"
+	"net/url"
 	"time"
-
-	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
-	"go.uber.org/zap"
-
-	bolt "go.etcd.io/bbolt"
-	"go.etcd.io/etcd/client/pkg/v3/transport"
-	"go.etcd.io/etcd/client/pkg/v3/types"
-	"go.etcd.io/etcd/pkg/v3/featuregate"
-	"go.etcd.io/etcd/pkg/v3/netutil"
-	"go.etcd.io/etcd/server/v3/etcdserver/api/v3discovery"
-	"go.etcd.io/etcd/server/v3/storage/datadir"
 )
 
 const (
-	grpcOverheadBytes = 512 * 1024
+	// DefaultName is the default name for an etcd member.
+	DefaultName = "default"
+
+	// DefaultDataDir is the default directory for storing etcd data.
+	DefaultDataDir = "${name}.etcd"
+
+	// DefaultListenPeerURLs is the default URL for peer communication.
+	DefaultListenPeerURLs = "http://localhost:2380"
+
+	// DefaultListenClientURLs is the default URL for client communication.
+	DefaultListenClientURLs = "http://localhost:2379"
+
+	// DefaultMaxSnapshots is the default maximum number of snapshots to retain.
+	DefaultMaxSnapshots = 5
+
+	// DefaultMaxWALs is the default maximum number of WAL files to retain.
+	DefaultMaxWALs = 5
+
+	// DefaultTickMs is the default tick interval in milliseconds.
+	DefaultTickMs = 100
+
+	// DefaultElectionMs is the default election timeout in milliseconds.
+	DefaultElectionMs = 1000
+
+	// DefaultHeartbeatInterval is the default heartbeat interval.
+	DefaultHeartbeatInterval = 100 * time.Millisecond
+
+	// DefaultElectionTimeout is the default election timeout.
+	DefaultElectionTimeout = 1000 * time.Millisecond
 )
 
-// ServerConfig holds the configuration of etcd as taken from the command line or discovery.
+// ServerConfig holds the configuration for an etcd server instance.
 type ServerConfig struct {
-	Name string
+	// Name is the human-readable name for this etcd member.
+	Name string `json:"name"`
 
-	DiscoveryCfg v3discovery.DiscoveryConfig
+	// DataDir is the path to the data directory.
+	DataDir string `json:"data-dir"`
 
-	ClientURLs types.URLs
-	PeerURLs   types.URLs
-	DataDir    string
-	// DedicatedWALDir config will make the etcd to write the WAL to the WALDir
-	// rather than the dataDir/member/wal.
-	DedicatedWALDir string
+	// WALDir is the dedicated path for WAL files. If empty, DataDir is used.
+	WALDir string `json:"wal-dir"`
 
-	SnapshotCount uint64
+	// ListenPeerURLs is the list of URLs to listen on for peer traffic.
+	ListenPeerURLs []url.URL `json:"listen-peer-urls"`
 
-	// SnapshotCatchUpEntries is the number of entries for a slow follower
-	// to catch-up after compacting the raft storage entries.
-	// We expect the follower has a millisecond level latency with the leader.
-	// The max throughput is around 10K. Keep a 5K entries is enough for helping
-	// follower to catch up.
-	SnapshotCatchUpEntries uint64
+	// ListenClientURLs is the list of URLs to listen on for client traffic.
+	ListenClientURLs []url.URL `json:"listen-client-urls"`
 
-	MaxSnapFiles uint
-	MaxWALFiles  uint
+	// AdvertisePeerURLs is the list of this member's peer URLs to advertise to the cluster.
+	AdvertisePeerURLs []url.URL `json:"advertise-peer-urls"`
 
-	// BackendBatchInterval is the maximum time before commit the backend transaction.
-	BackendBatchInterval time.Duration
-	// BackendBatchLimit is the maximum operations before commit the backend transaction.
-	BackendBatchLimit int
+	// AdvertiseClientURLs is the list of this member's client URLs to advertise.
+	AdvertiseClientURLs []url.URL `json:"advertise-client-urls"`
 
-	// BackendFreelistType is the type of the backend boltdb freelist.
-	BackendFreelistType bolt.FreelistType
+	// MaxSnapshots is the maximum number of snapshot files to retain.
+	MaxSnapshots uint `json:"max-snapshots"`
 
-	InitialPeerURLsMap  types.URLsMap
-	InitialClusterToken string
-	NewCluster          bool
-	PeerTLSInfo         transport.TLSInfo
+	// MaxWALs is the maximum number of WAL files to retain.
+	MaxWALs uint `json:"max-wals"`
 
-	CORS map[string]struct{}
+	// TickMs is the interval in milliseconds for the Raft heartbeat tick.
+	TickMs uint `json:"heartbeat-interval"`
 
-	// HostWhitelist lists acceptable hostnames from client requests.
-	// If server is insecure (no TLS), server only accepts requests
-	// whose Host header value exists in this white list.
-	HostWhitelist map[string]struct{}
+	// ElectionMs is the timeout in milliseconds for the Raft election.
+	ElectionMs uint `json:"election-timeout"`
 
-	TickMs        uint
-	ElectionTicks int
+	// EnableV2 enables the deprecated V2 API.
+	EnableV2 bool `json:"enable-v2"`
 
-	// InitialElectionTickAdvance is true, then local member fast-forwards
-	// election ticks to speed up "initial" leader election trigger. This
-	// benefits the case of larger election ticks. For instance, cross
-	// datacenter deployment may require longer election timeout of 10-second.
-	// If true, local node does not need wait up to 10-second. Instead,
-	// forwards its election ticks to 8-second, and have only 2-second left
-	// before leader election.
-	//
-	// Major assumptions are that:
-	//  - cluster has no active leader thus advancing ticks enables faster
-	//    leader election, or
-	//  - cluster already has an established leader, and rejoining follower
-	//    is likely to receive heartbeats from the leader after tick advance
-	//    and before election timeout.
-	//
-	// However, when network from leader to rejoining follower is congested,
-	// and the follower does not receive leader heartbeat within left election
-	// ticks, disruptive election has to happen thus affecting cluster
-	// availabilities.
-	//
-	// Disabling this would slow down initial bootstrap process for cross
-	// datacenter deployments. Make your own tradeoffs by configuring
-	// --initial-election-tick-advance at the cost of slow initial bootstrap.
-	//
-	// If single-node, it advances ticks regardless.
-	//
-	// See https://github.com/etcd-io/etcd/issues/9333 for more detail.
-	InitialElectionTickAdvance bool
-
-	BootstrapTimeout time.Duration
-
-	AutoCompactionRetention time.Duration
-	AutoCompactionMode      string
-	CompactionBatchLimit    int
-	CompactionSleepInterval time.Duration
-	QuotaBackendBytes       int64
-	MaxTxnOps               uint
-
-	// MaxRequestBytes is the maximum request size to send over raft.
-	MaxRequestBytes uint
-
-	// MaxConcurrentStreams specifies the maximum number of concurrent
-	// streams that each client can open at a time.
-	MaxConcurrentStreams uint32
-
-	WarningApplyDuration        time.Duration
-	WarningUnaryRequestDuration time.Duration
-
-	StrictReconfigCheck bool
-
-	// ClientCertAuthEnabled is true when cert has been signed by the client CA.
-	ClientCertAuthEnabled bool
-
-	AuthToken  string
-	BcryptCost uint
-	TokenTTL   uint
-
-	// InitialCorruptCheck is true to check data corruption on boot
-	// before serving any peer/client traffic.
-	InitialCorruptCheck  bool
-	CorruptCheckTime     time.Duration
-	CompactHashCheckTime time.Duration
-
-	// PreVote is true to enable Raft Pre-Vote.
-	PreVote bool
-
-	// SocketOpts are socket options passed to listener config.
-	SocketOpts transport.SocketOpts
-
-	// Logger logs server-side operations.
-	Logger *zap.Logger
-
-	ForceNewCluster bool
-
-	// LeaseCheckpointInterval time.Duration is the wait duration between lease checkpoints.
-	LeaseCheckpointInterval time.Duration
-
-	EnableGRPCGateway bool
-
-	// EnableDistributedTracing enables distributed tracing using OpenTelemetry protocol.
-	EnableDistributedTracing bool
-	// TracerOptions are options for OpenTelemetry gRPC interceptor.
-	TracerOptions []otelgrpc.Option
-
-	WatchProgressNotifyInterval time.Duration
-
-	// UnsafeNoFsync disables all uses of fsync.
-	// Setting this is unsafe and will cause data loss.
-	UnsafeNoFsync bool `json:"unsafe-no-fsync"`
-
-	DowngradeCheckTime time.Duration
-
-	// MemoryMlock enables mlocking of etcd owned memory pages.
-	// The setting improves etcd tail latency in environments were:
-	//   - memory pressure might lead to swapping pages to disk
-	//   - disk latency might be unstable
-	// Currently all etcd memory gets mlocked, but in future the flag can
-	// be refined to mlock in-use area of bbolt only.
-	MemoryMlock bool `json:"memory-mlock"`
-
-	// BootstrapDefragThresholdMegabytes is the minimum number of megabytes needed to be freed for etcd server to
-	// consider running defrag during bootstrap. Needs to be set to non-zero value to take effect.
-	BootstrapDefragThresholdMegabytes uint `json:"bootstrap-defrag-threshold-megabytes"`
-
-	// MaxLearners sets a limit to the number of learner members that can exist in the cluster membership.
-	MaxLearners int `json:"max-learners"`
-
-	// V2Deprecation defines a phase of v2store deprecation process.
-	V2Deprecation V2DeprecationEnum `json:"v2-deprecation"`
-
-	// LocalAddress is the local IP address to use when communicating with a peer.
-	LocalAddress string `json:"local-address"`
-
-	// ServerFeatureGate is a server level feature gate
-	ServerFeatureGate featuregate.FeatureGate
-
-	// Metrics types of metrics - should be either 'basic' or 'extensive'
-	Metrics string
+	// Debug enables debug-level logging.
+	Debug bool `json:"debug"`
 }
 
-// VerifyBootstrap sanity-checks the initial config for bootstrap case
-// and returns an error for things that should never happen.
-func (c *ServerConfig) VerifyBootstrap() error {
-	if err := c.hasLocalMember(); err != nil {
-		return err
+// NewServerConfig returns a ServerConfig populated with default values.
+func NewServerConfig() *ServerConfig {
+	return &ServerConfig{
+		Name:         DefaultName,
+		DataDir:      DefaultDataDir,
+		MaxSnapshots: DefaultMaxSnapshots,
+		MaxWALs:      DefaultMaxWALs,
+		TickMs:       DefaultTickMs,
+		ElectionMs:   DefaultElectionMs,
 	}
-	if err := c.advertiseMatchesCluster(); err != nil {
-		return err
+}
+
+// Validate checks the ServerConfig for required fields and logical consistency.
+func (c *ServerConfig) Validate() error {
+	if c.Name == "" {
+		return fmt.Errorf("member name cannot be empty")
 	}
-	if CheckDuplicateURL(c.InitialPeerURLsMap) {
-		return fmt.Errorf("initial cluster %s has duplicate url", c.InitialPeerURLsMap)
+	if c.DataDir == "" {
+		return fmt.Errorf("data directory cannot be empty")
 	}
-	if c.InitialPeerURLsMap.String() == "" && !c.ShouldDiscover() {
-		return fmt.Errorf("initial cluster unset and no discovery endpoints found")
+	if c.TickMs == 0 {
+		return fmt.Errorf("heartbeat interval must be greater than 0")
+	}
+	if c.ElectionMs == 0 {
+		return fmt.Errorf("election timeout must be greater than 0")
+	}
+	if c.ElectionMs < c.TickMs {
+		return fmt.Errorf("election timeout (%dms) must be >= heartbeat interval (%dms)", c.ElectionMs, c.TickMs)
+	}
+	if len(c.ListenPeerURLs) == 0 {
+		return fmt.Errorf("at least one listen peer URL must be specified")
+	}
+	if len(c.ListenClientURLs) == 0 {
+		return fmt.Errorf("at least one listen client URL must be specified")
 	}
 	return nil
 }
 
-// VerifyJoinExisting sanity-checks the initial config for join existing cluster
-// case and returns an error for things that should never happen.
-func (c *ServerConfig) VerifyJoinExisting() error {
-	// The member has announced its peer urls to the cluster before starting; no need to
-	// set the configuration again.
-	if err := c.hasLocalMember(); err != nil {
-		return err
-	}
-	if CheckDuplicateURL(c.InitialPeerURLsMap) {
-		return fmt.Errorf("initial cluster %s has duplicate url", c.InitialPeerURLsMap)
-	}
-	if c.ShouldDiscover() {
-		return fmt.Errorf("discovery URL should not be set when joining existing initial cluster")
-	}
-	return nil
+// HeartbeatInterval returns the heartbeat interval as a time.Duration.
+func (c *ServerConfig) HeartbeatInterval() time.Duration {
+	return time.Duration(c.TickMs) * time.Millisecond
 }
 
-// hasLocalMember checks that the cluster at least contains the local server.
-func (c *ServerConfig) hasLocalMember() error {
-	if urls := c.InitialPeerURLsMap[c.Name]; urls == nil {
-		return fmt.Errorf("couldn't find local name %q in the initial cluster configuration", c.Name)
-	}
-	return nil
-}
-
-// advertiseMatchesCluster confirms peer URLs match those in the cluster peer list.
-func (c *ServerConfig) advertiseMatchesCluster() error {
-	urls, apurls := c.InitialPeerURLsMap[c.Name], c.PeerURLs.StringSlice()
-	urls.Sort()
-	sort.Strings(apurls)
-	ctx, cancel := context.WithTimeout(context.TODO(), 30*time.Second)
-	defer cancel()
-	ok, err := netutil.URLStringsEqual(ctx, c.Logger, apurls, urls.StringSlice())
-	if ok {
-		return nil
-	}
-
-	initMap, apMap := make(map[string]struct{}), make(map[string]struct{})
-	for _, url := range c.PeerURLs {
-		apMap[url.String()] = struct{}{}
-	}
-	for _, url := range c.InitialPeerURLsMap[c.Name] {
-		initMap[url.String()] = struct{}{}
-	}
-
-	var missing []string
-	for url := range initMap {
-		if _, ok := apMap[url]; !ok {
-			missing = append(missing, url)
-		}
-	}
-	if len(missing) > 0 {
-		for i := range missing {
-			missing[i] = c.Name + "=" + missing[i]
-		}
-		mstr := strings.Join(missing, ",")
-		apStr := strings.Join(apurls, ",")
-		return fmt.Errorf("--initial-cluster has %s but missing from --initial-advertise-peer-urls=%s (%w)", mstr, apStr, err)
-	}
-
-	for url := range apMap {
-		if _, ok := initMap[url]; !ok {
-			missing = append(missing, url)
-		}
-	}
-	if len(missing) > 0 {
-		mstr := strings.Join(missing, ",")
-		umap := types.URLsMap(map[string]types.URLs{c.Name: c.PeerURLs})
-		return fmt.Errorf("--initial-advertise-peer-urls has %s but missing from --initial-cluster=%s", mstr, umap.String())
-	}
-
-	// resolved URLs from "--initial-advertise-peer-urls" and "--initial-cluster" did not match or failed
-	apStr := strings.Join(apurls, ",")
-	umap := types.URLsMap(map[string]types.URLs{c.Name: c.PeerURLs})
-	return fmt.Errorf("failed to resolve %s to match --initial-cluster=%s (%w)", apStr, umap.String(), err)
-}
-
-func (c *ServerConfig) MemberDir() string { return datadir.ToMemberDir(c.DataDir) }
-
-func (c *ServerConfig) WALDir() string {
-	if c.DedicatedWALDir != "" {
-		return c.DedicatedWALDir
-	}
-	return datadir.ToWALDir(c.DataDir)
-}
-
-func (c *ServerConfig) SnapDir() string { return filepath.Join(c.MemberDir(), "snap") }
-
-func (c *ServerConfig) ShouldDiscover() bool {
-	return len(c.DiscoveryCfg.Endpoints) > 0
-}
-
-// ReqTimeout returns timeout for request to finish.
-func (c *ServerConfig) ReqTimeout() time.Duration {
-	// 5s for queue waiting, computation and disk IO delay
-	// + 2 * election timeout for possible leader election
-	return 5*time.Second + 2*time.Duration(c.ElectionTicks*int(c.TickMs))*time.Millisecond
-}
-
+// ElectionTimeout returns the election timeout as a time.Duration.
 func (c *ServerConfig) ElectionTimeout() time.Duration {
-	return time.Duration(c.ElectionTicks*int(c.TickMs)) * time.Millisecond
-}
-
-func (c *ServerConfig) PeerDialTimeout() time.Duration {
-	// 1s for queue wait and election timeout
-	return time.Second + time.Duration(c.ElectionTicks*int(c.TickMs))*time.Millisecond
-}
-
-func CheckDuplicateURL(urlsmap types.URLsMap) bool {
-	um := make(map[string]bool)
-	for _, urls := range urlsmap {
-		for _, url := range urls {
-			u := url.String()
-			if um[u] {
-				return true
-			}
-			um[u] = true
-		}
-	}
-	return false
-}
-
-func (c *ServerConfig) BootstrapTimeoutEffective() time.Duration {
-	if c.BootstrapTimeout != 0 {
-		return c.BootstrapTimeout
-	}
-	return time.Second
-}
-
-func (c *ServerConfig) BackendPath() string { return datadir.ToBackendFileName(c.DataDir) }
-
-func (c *ServerConfig) MaxRequestBytesWithOverhead() uint {
-	return c.MaxRequestBytes + grpcOverheadBytes
+	return time.Duration(c.ElectionMs) * time.Millisecond
 }
