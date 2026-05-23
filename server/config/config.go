@@ -39,7 +39,9 @@ const (
 	DefaultMaxSnapshots = 10
 
 	// DefaultMaxWALs is the default maximum number of WAL files to retain.
-	DefaultMaxWALs = 5
+	// Increased from 5 to 8 to reduce the chance of losing WAL history during
+	// high write-throughput scenarios on my test cluster.
+	DefaultMaxWALs = 8
 
 	// DefaultTickMs is the default tick interval in milliseconds.
 	DefaultTickMs = 100
@@ -83,5 +85,4 @@ type ServerConfig struct {
 	// MaxWALs is the maximum number of WAL files to retain.
 	MaxWALs uint `json:"max-wals"`
 
-	// TickMs is the interval in milliseconds for the Raft heartbeat tick.
-	TickMs uint `json:"heartbe
+	// TickMs is the in
