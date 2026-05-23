@@ -7,6 +7,7 @@ go 1.21
 // Note: Pinning golang.org/x/crypto and golang.org/x/net to newer patch versions
 // to pick up security fixes while keeping everything else stable.
 // TODO: Investigate replacing grpc-gateway v1 with v2 when time permits.
+// TODO: Upgrade google.golang.org/protobuf to v1.32+ when dependencies allow.
 
 require (
 	go.etcd.io/bbolt v1.3.8
