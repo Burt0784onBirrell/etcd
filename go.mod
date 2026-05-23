@@ -2,6 +2,9 @@ module go.etcd.io/etcd/v3
 
 go 1.21
 
+// Personal fork of etcd-io/etcd for learning and experimentation.
+// Upstream: https://github.com/etcd-io/etcd
+
 require (
 	go.etcd.io/bbolt v1.3.8
 	go.etcd.io/raft/v3 v3.0.0-20231201111602-11d438b4b8f0
