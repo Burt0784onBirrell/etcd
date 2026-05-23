@@ -6,6 +6,7 @@ go 1.21
 // Upstream: https://github.com/etcd-io/etcd
 // Note: Pinning golang.org/x/crypto and golang.org/x/net to newer patch versions
 // to pick up security fixes while keeping everything else stable.
+// TODO: Investigate replacing grpc-gateway v1 with v2 when time permits.
 
 require (
 	go.etcd.io/bbolt v1.3.8
